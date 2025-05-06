@@ -25,5 +25,5 @@ cmds = [
 
 # Default process to run
 [start]
-cmd = "source /opt/venv/bin/activate && cd /app/service-scoring && uvicorn main:app --host 0.0.0.0 --port $PORT"
+cmd = "./start.sh"
 stopTimeout = 5
