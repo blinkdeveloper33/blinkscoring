@@ -25,5 +25,5 @@ cmds = [
 
 # Default process to run
 [start]
-cmd = "./start.sh"
+cmd = "./start-railway.sh"
 stopTimeout = 5
