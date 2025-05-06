@@ -23,9 +23,13 @@ cmds = [
   "pip install --no-cache-dir -r requirements.txt"
 ]
 
+# Diagnostic command to run before startup (temporary)
+[processes.diagnostic]
+cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)'"
+
 # Default process to run
 [processes.web]
-cmd = "python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
+cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)' && python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
 
 [processes.cron]
 cmd = "python -m service_cron.worker"
