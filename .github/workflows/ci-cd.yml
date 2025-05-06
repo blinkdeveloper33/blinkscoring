@@ -83,8 +83,13 @@ jobs:
           RAILWAY_ENV=$(echo ${{ github.ref_name }} | sed 's/main/production/;s/develop/staging/')
           echo "Deploying to $RAILWAY_ENV environment"
           
-          # Deploy to the blinkscoring project
-          echo "Deploying to blinkscoring project..."
-          railway up --project blinkscoring --environment $RAILWAY_ENV
+          # Check Railway status
+          echo "Checking Railway status..."
+          railway whoami
+          railway list
+          
+          # Deploy without project specification
+          echo "Deploying project..."
+          railway up --environment $RAILWAY_ENV || railway up
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }} 
