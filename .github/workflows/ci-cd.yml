@@ -43,7 +43,6 @@ jobs:
                     python312Packages.pandas
                     python312Packages.numpy
                     python312Packages.requests
-                    python312Packages.treelite_runtime
                   ];
                 };
             };
