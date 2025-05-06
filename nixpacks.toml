@@ -1,5 +1,6 @@
 [variables]
 NIXPACKS_NO_AUTO_INSTALL = "true"
+PYTHONPATH = "/app"
 
 [phases.setup]
 nixPkgs = [
@@ -25,11 +26,11 @@ cmds = [
 
 # Diagnostic command to run before startup (temporary)
 [processes.diagnostic]
-cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)'"
+cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)' && echo 'ENV:' && env | grep PYTHON"
 
 # Default process to run
 [processes.web]
-cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)' && python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
+cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys, os; print(\"CWD:\", os.getcwd()); print(\"Files:\", os.listdir(\".\")); print(\"Path:\", sys.path)' && source /opt/venv/bin/activate && python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
 
 [processes.cron]
 cmd = "python -m service_cron.worker"
