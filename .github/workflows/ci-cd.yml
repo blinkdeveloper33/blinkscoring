@@ -80,16 +80,8 @@ jobs:
 
       - name: Deploy to Railway
         run: |
-          RAILWAY_ENV=$(echo ${{ github.ref_name }} | sed 's/main/production/;s/develop/staging/')
-          echo "Deploying to $RAILWAY_ENV environment"
-          
-          # Check Railway status
-          echo "Checking Railway status..."
-          railway whoami
-          railway list
-          
-          # Deploy without project specification
-          echo "Deploying project..."
-          railway up --environment $RAILWAY_ENV || railway up
+          # Simple deploy command - Railway CLI will automatically use the RAILWAY_TOKEN
+          # to determine the project to deploy
+          railway up
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }} 

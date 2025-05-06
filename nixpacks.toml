@@ -24,16 +24,16 @@ cmds = [
   "pip install --no-cache-dir -r requirements.txt"
 ]
 
-# Diagnostic command to run before startup (temporary)
+# Diagnostic command to run before startup
 [processes.diagnostic]
-cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)' && echo 'ENV:' && env | grep PYTHON"
+cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys; print(sys.path)' && echo 'ENV:' && env | grep PYTHON && python /app/debug_path.py"
 
 # Default process to run
 [processes.web]
-cmd = "ls -la /app && echo 'PYTHON PATH:' && python -c 'import sys, os; print(\"CWD:\", os.getcwd()); print(\"Files:\", os.listdir(\".\")); print(\"Path:\", sys.path)' && source /opt/venv/bin/activate && python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
+cmd = "source /opt/venv/bin/activate && python /app/debug_path.py && python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
 
 [processes.cron]
-cmd = "python -m service_cron.worker"
+cmd = "source /opt/venv/bin/activate && python /app/debug_path.py && python -m service_cron.worker"
 
 [processes.trainer]
-cmd = "python -m service_trainer.train"
+cmd = "source /opt/venv/bin/activate && python /app/debug_path.py && python -m service_trainer.train"

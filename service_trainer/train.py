@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
-BlinkScoring ML Trainer
-
-This module is responsible for:
-1. Loading historical repayment data
-2. Training a new ML model
-3. Evaluating the model against the current production model
-4. Promoting the new model to production if it's better
+LightGBM training script for risk scoring model.
+Extracts features from database, trains a model, and exports to both
+native LightGBM and optimized Treelite formats.
 """
 import os
 import sys
@@ -15,10 +11,16 @@ import uuid
 import logging
 import traceback
 from pathlib import Path
-from datetime import datetime
+import datetime as dt
+from typing import Tuple
 import pickle
 import numpy as np
 import pandas as pd
+import lightgbm as lgb
+import treelite
+import sqlalchemy as sa
+from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, f1_score
+from sklearn.model_selection import train_test_split
 
 # Add the parent directory to the path so we can import common
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,15 +41,27 @@ MIN_AUC_IMPROVEMENT = float(os.getenv("MIN_AUC_IMPROVEMENT", "0.01"))
 FEATURE_LIST_PATH = os.path.join(MODEL_DIR, "feature_list.json")
 SNAPSHOT_DAYS = int(os.getenv("SNAPSHOT_DAYS", "90"))
 
-try:
-    import lightgbm as lgb
-    import shap
-    from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, f1_score
-    from sklearn.model_selection import train_test_split
-    ML_LIBRARIES_AVAILABLE = True
-except ImportError:
-    logger.warning("ML libraries not available, will use dummy training")
-    ML_LIBRARIES_AVAILABLE = False
+# Connection settings
+DB_URL = os.getenv("DATABASE_URL")
+
+# Feature columns based on risk_score_audits table
+FEATURE_COLS = [
+    'metric_observed_history_days',
+    'metric_median_paycheck',
+    'metric_paycheck_regularity', 
+    'metric_days_since_last_paycheck',
+    'metric_overdraft_count90',
+    'metric_net_cash30',
+    'metric_debt_load30',
+    'metric_volatility90',
+    'metric_clean_buffer7',
+    'metric_buffer_volatility',
+    'metric_deposit_multiplicity30',
+]
+
+# Target and time column for temporal splitting
+TARGET = 'target_label'
+TIME_COL = 'snapshot_timestamp'
 
 def get_repayment_data(days=SNAPSHOT_DAYS):
     """
@@ -179,308 +193,287 @@ def prepare_training_data(df):
     
     return X, y, feature_cols
 
-def train_model(X_train, y_train, feature_names):
-    """
-    Train a LightGBM model
+def load_data() -> pd.DataFrame:
+    """Extract training data from the database."""
+    logger.info("Loading data from database")
     
-    Args:
-        X_train: Training feature matrix
-        y_train: Training labels
-        feature_names: List of feature names
-        
-    Returns:
-        Trained model
+    eng = sa.create_engine(DB_URL)
+    
+    # Query that extracts features and creates a binary target label
+    # indicating whether a user has ever defaulted/been delinquent
+    query = """
+    SELECT
+        r.user_id,
+        r.snapshot_timestamp,
+        r.metric_observed_history_days,
+        r.metric_median_paycheck,
+        r.metric_paycheck_regularity,
+        r.metric_days_since_last_paycheck,
+        r.metric_overdraft_count90,
+        r.metric_net_cash30,
+        r.metric_debt_load30,
+        r.metric_volatility90,
+        r.metric_clean_buffer7,
+        r.metric_buffer_volatility,
+        r.metric_deposit_multiplicity30,
+        CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM repayments rep
+                WHERE rep.user_id = r.user_id
+                  AND rep.status IN ('defaulted','delinquent','escalated')
+                  AND rep.created_at > r.snapshot_timestamp
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM cash_advances ca
+                WHERE ca.user_id = r.user_id
+                  AND ca.status = 'overdue'
+                  AND ca.created_at > r.snapshot_timestamp
+            )
+            THEN 1 ELSE 0
+        END AS target_label
+    FROM risk_score_audits r
     """
-    if not ML_LIBRARIES_AVAILABLE:
-        logger.warning("ML libraries not available, returning dummy model")
-        return DummyModel()
     
     try:
-        # Create dataset
-        train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
+        with eng.connect() as conn:
+            df = pd.read_sql(query, conn)
         
-        # Define parameters - focus on interpretability
-        params = {
-            'objective': 'binary',
-            'metric': 'auc',
-            'boosting_type': 'gbdt',
-            'num_leaves': 31,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbose': -1
-        }
+        logger.info(f"Loaded {len(df)} rows of data")
         
-        # Train model
-        logger.info("Training LightGBM model")
-        model = lgb.train(
-            params,
-            train_data,
-            num_boost_round=100,
-            valid_sets=[train_data],
-            early_stopping_rounds=10,
-            verbose_eval=20
-        )
+        # Drop rows with missing values
+        orig_len = len(df)
+        df = df.dropna(subset=FEATURE_COLS + [TARGET])
+        if len(df) < orig_len:
+            logger.warning(f"Dropped {orig_len - len(df)} rows with missing values")
         
-        return model
+        return df
+    
     except Exception as e:
-        logger.error(f"Error training model: {e}")
-        traceback.print_exc()
-        return None
+        logger.error(f"Error loading data: {e}")
+        raise
 
-class DummyModel:
-    """Dummy model for testing"""
-    
-    def __init__(self):
-        self.feature_importances_ = [0.1] * 10
-        
-    def predict(self, X):
-        """Return random predictions"""
-        return np.random.random(len(X))
-        
-    def feature_importance(self):
-        """Return dummy feature importances"""
-        return self.feature_importances_
-
-def evaluate_model(model, X_test, y_test, feature_names):
+def temporal_split(df: pd.DataFrame, train_ratio: float = 0.8) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Evaluate a trained model
+    Split data temporally to avoid look-ahead bias.
     
     Args:
-        model: Trained model
-        X_test: Test feature matrix
-        y_test: Test labels
-        feature_names: List of feature names
+        df: DataFrame with features and target
+        train_ratio: Portion of data (by time) to use for training
         
     Returns:
-        Dictionary with evaluation metrics
+        Training and validation DataFrames
     """
-    if not ML_LIBRARIES_AVAILABLE:
-        logger.warning("ML libraries not available, returning dummy metrics")
-        return {
-            "auc": 0.75,
-            "accuracy": 0.8,
-            "feature_importance": dict(zip(feature_names, [0.1] * len(feature_names)))
-        }
+    logger.info(f"Performing temporal split with {train_ratio:.0%} train, {1-train_ratio:.0%} validation")
     
-    try:
-        # Get predictions
-        y_pred = model.predict(X_test)
-        
-        # Calculate AUC
-        auc_score = roc_auc_score(y_test, y_pred)
-        
-        # Calculate precision-recall AUC
-        precision, recall, _ = precision_recall_curve(y_test, y_pred)
-        pr_auc = auc(recall, precision)
-        
-        # Get binary predictions using 0.5 threshold
-        y_pred_binary = (y_pred > 0.5).astype(int)
-        
-        # Calculate accuracy
-        accuracy = (y_pred_binary == y_test).mean()
-        
-        # Calculate F1 score
-        f1 = f1_score(y_test, y_pred_binary)
-        
-        # Get feature importance
-        feature_importance = model.feature_importance()
-        importance_dict = dict(zip(feature_names, feature_importance))
-        
-        # Sort features by importance
-        sorted_importance = sorted(
-            importance_dict.items(), 
-            key=lambda x: x[1], 
-            reverse=True
-        )
-        
-        return {
-            "auc": auc_score,
-            "pr_auc": pr_auc,
-            "accuracy": accuracy,
-            "f1_score": f1,
-            "feature_importance": dict(sorted_importance)
-        }
-    except Exception as e:
-        logger.error(f"Error evaluating model: {e}")
-        traceback.print_exc()
-        return None
+    # Sort by timestamp
+    df = df.sort_values(by=TIME_COL)
+    
+    # Find the cutoff timestamp
+    cutoff_idx = int(len(df) * train_ratio)
+    cutoff_time = df.iloc[cutoff_idx][TIME_COL]
+    
+    # Split the data
+    train_df = df[df[TIME_COL] <= cutoff_time].copy()
+    valid_df = df[df[TIME_COL] > cutoff_time].copy()
+    
+    logger.info(f"Train set: {len(train_df)} rows, Validation set: {len(valid_df)} rows")
+    logger.info(f"Cutoff time: {cutoff_time}")
+    
+    # Check class balance
+    train_pos = train_df[TARGET].mean()
+    valid_pos = valid_df[TARGET].mean()
+    logger.info(f"Train positive rate: {train_pos:.2%}, Validation positive rate: {valid_pos:.2%}")
+    
+    return train_df, valid_df
 
-def generate_feature_descriptions(feature_names, importance):
-    """
-    Generate human-readable descriptions for features
+def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply feature engineering transformations."""
+    logger.info("Applying feature engineering")
     
-    Args:
-        feature_names: List of feature names
-        importance: Dictionary of feature importance values
-        
-    Returns:
-        Dictionary mapping feature names to descriptions
-    """
-    descriptions = {}
+    # Create a copy to avoid modifying the original
+    df = df.copy()
     
-    for feature in feature_names:
-        if feature.startswith("metric_"):
-            # Remove "metric_" prefix
-            clean_name = feature[7:]
-            
-            # Convert snake_case to words
-            words = clean_name.split("_")
-            capitalized = [word.capitalize() for word in words]
-            
-            # Create description
-            description = " ".join(capitalized)
-            
-            # Add impact
-            if feature in importance:
-                imp = importance[feature]
-                if imp > 0:
-                    description += f" (Positive impact on score)"
-                else:
-                    description += f" (Negative impact on score)"
-            
-            descriptions[feature] = description
-        else:
-            descriptions[feature] = feature
-    
-    return descriptions
-
-def create_shap_explainer(model, X_train, feature_names):
-    """
-    Create a SHAP explainer for the model
-    
-    Args:
-        model: Trained model
-        X_train: Training feature matrix
-        feature_names: List of feature names
-        
-    Returns:
-        SHAP explainer object
-    """
-    if not ML_LIBRARIES_AVAILABLE:
-        logger.warning("ML libraries not available, no SHAP explainer created")
-        return None
-        
-    try:
-        logger.info("Creating SHAP explainer")
-        explainer = shap.TreeExplainer(model)
-        
-        # Test the explainer on a small sample
-        sample_size = min(10, X_train.shape[0])
-        sample_data = X_train[:sample_size]
-        shap_values = explainer.shap_values(sample_data)
-        
-        logger.info(f"SHAP explainer created successfully, values shape: {np.array(shap_values).shape}")
-        
-        return explainer
-    except Exception as e:
-        logger.error(f"Error creating SHAP explainer: {e}")
-        traceback.print_exc()
-        return None
-
-def save_model(model, explainer, feature_names, metrics, version_tag=None):
-    """
-    Save model and metadata to disk
-    
-    Args:
-        model: Trained model
-        explainer: SHAP explainer
-        feature_names: List of feature names
-        metrics: Dictionary of evaluation metrics
-        version_tag: Optional version tag
-        
-    Returns:
-        Path to saved model
-    """
-    # Create version tag if not provided
-    if version_tag is None:
-        date_str = datetime.now().strftime("%Y-%m-%d-%H%M")
-        version_tag = f"v{metrics['auc']:.3f}-{date_str}"
-    
-    # Create directory for model
-    model_path = os.path.join(MODEL_DIR, version_tag)
-    os.makedirs(model_path, exist_ok=True)
-    
-    try:
-        # Save model
-        model_file = os.path.join(model_path, "model.txt")
-        if isinstance(model, DummyModel):
-            # Save dummy model
-            with open(model_file, "w") as f:
-                f.write("Dummy model for testing")
-        else:
-            # Save LightGBM model
-            model.save_model(model_file)
-        
-        # Save model as treelite model for faster inference
-        if not isinstance(model, DummyModel) and ML_LIBRARIES_AVAILABLE:
-            import treelite
-            import treelite.runtime
-            
-            treelite_model = treelite.Model.from_lightgbm(model)
-            treelite_file = os.path.join(model_path, "model.tl")
-            treelite_model.compile(dirpath=model_path)
-            treelite_model.export_lib(toolchain="gcc", libpath=treelite_file)
-        
-        # Save SHAP explainer
-        if explainer is not None:
-            explainer_file = os.path.join(model_path, "shap_explainer.pkl")
-            with open(explainer_file, "wb") as f:
-                pickle.dump(explainer, f)
-        
-        # Save feature names
-        feature_file = os.path.join(model_path, "features.json")
-        with open(feature_file, "w") as f:
-            json.dump(feature_names, f, indent=2)
-        
-        # Generate and save feature descriptions
-        descriptions = generate_feature_descriptions(
-            feature_names, 
-            metrics.get("feature_importance", {})
-        )
-        
-        desc_file = os.path.join(model_path, "feature_descriptions.json")
-        with open(desc_file, "w") as f:
-            json.dump(descriptions, f, indent=2)
-        
-        # Save metrics
-        metrics_file = os.path.join(model_path, "metrics.json")
-        with open(metrics_file, "w") as f:
-            # Convert numpy values to Python types for JSON serialization
-            serializable_metrics = {}
-            for k, v in metrics.items():
-                if k == "feature_importance":
-                    serializable_metrics[k] = {
-                        feature: float(imp) for feature, imp in v.items()
-                    }
-                elif isinstance(v, np.ndarray):
-                    serializable_metrics[k] = v.tolist()
-                elif isinstance(v, np.generic):
-                    serializable_metrics[k] = v.item()
-                else:
-                    serializable_metrics[k] = v
-                    
-            json.dump(serializable_metrics, f, indent=2)
-        
-        # Create latest symlink
-        latest_path = os.path.join(MODEL_DIR, "latest")
-        if os.path.exists(latest_path):
-            if os.path.islink(latest_path):
-                os.unlink(latest_path)
+    # Log transform for highly skewed numeric features
+    for col in ['metric_median_paycheck', 'metric_net_cash30']:
+        if col in df.columns:
+            # Handle negative values by adding minimum + 1
+            min_val = df[col].min()
+            if min_val < 0:
+                df[f'{col}_log'] = np.log(df[col] - min_val + 1)
             else:
-                import shutil
-                shutil.rmtree(latest_path)
-                
-        os.symlink(os.path.abspath(model_path), latest_path)
+                df[f'{col}_log'] = np.log(df[col] + 1)
+    
+    # Ratio features
+    if 'metric_net_cash30' in df.columns and 'metric_median_paycheck' in df.columns:
+        df['cash_to_income_ratio'] = df['metric_net_cash30'] / df['metric_median_paycheck'].clip(lower=1)
+    
+    # Interaction terms for strong predictors
+    if 'metric_debt_load30' in df.columns and 'metric_overdraft_count90' in df.columns:
+        df['debt_overdraft_interaction'] = df['metric_debt_load30'] * df['metric_overdraft_count90']
+    
+    # Add derived columns to feature list
+    global FEATURE_COLS
+    new_cols = [col for col in df.columns if col not in FEATURE_COLS 
+                and col not in [TARGET, TIME_COL, 'user_id']
+                and not pd.isna(df[col]).all()]
+    
+    FEATURE_COLS = FEATURE_COLS + new_cols
+    logger.info(f"Added {len(new_cols)} engineered features. Total features: {len(FEATURE_COLS)}")
+    
+    return df
+
+def train_model(train_df: pd.DataFrame, valid_df: pd.DataFrame):
+    """
+    Train a LightGBM model for risk scoring.
+    
+    Args:
+        train_df: Training data
+        valid_df: Validation data
         
-        logger.info(f"Model saved to {model_path}")
-        return model_path
+    Returns:
+        Trained LightGBM model
+    """
+    logger.info("Training LightGBM model")
+    
+    # Create datasets
+    train_set = lgb.Dataset(
+        train_df[FEATURE_COLS], 
+        label=train_df[TARGET],
+        feature_name=FEATURE_COLS
+    )
+    
+    valid_set = lgb.Dataset(
+        valid_df[FEATURE_COLS], 
+        label=valid_df[TARGET],
+        feature_name=FEATURE_COLS,
+        reference=train_set
+    )
+    
+    # Model parameters - focused on preventing overfitting
+    params = {
+        "objective": "binary",
+        "metric": ["auc", "binary_logloss"],
+        "boosting_type": "gbdt",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "min_data_in_leaf": 50,
+        "min_sum_hessian_in_leaf": 10.0,
+        "max_depth": 6,
+        "seed": 42,
+        "verbose": -1
+    }
+    
+    # Train with early stopping
+    model = lgb.train(
+        params,
+        train_set,
+        num_boost_round=10000,
+        valid_sets=[valid_set, train_set],
+        valid_names=["valid", "train"],
+        early_stopping_rounds=100,
+        verbose_eval=100,
+    )
+    
+    # Evaluate on validation set
+    y_pred = model.predict(valid_df[FEATURE_COLS])
+    auc_score = roc_auc_score(valid_df[TARGET], y_pred)
+    
+    # Calculate PR AUC as well
+    precision, recall, _ = precision_recall_curve(valid_df[TARGET], y_pred)
+    pr_auc = auc(recall, precision)
+    
+    logger.info(f"Validation ROC-AUC: {auc_score:.4f}")
+    logger.info(f"Validation PR-AUC: {pr_auc:.4f}")
+    
+    # Feature importance
+    importance = model.feature_importance(importance_type='gain')
+    feature_importance = pd.DataFrame({
+        'Feature': FEATURE_COLS,
+        'Importance': importance
+    }).sort_values(by='Importance', ascending=False)
+    
+    logger.info("Top 10 features by importance:")
+    for i, (feature, importance) in enumerate(zip(feature_importance['Feature'].values[:10], 
+                                                feature_importance['Importance'].values[:10])):
+        logger.info(f"{i+1}. {feature}: {importance:.2f}")
+    
+    return model, auc_score, pr_auc, feature_importance
+
+def export_model(model, metrics=None):
+    """
+    Export the trained model to disk in multiple formats.
+    
+    Args:
+        model: Trained LightGBM model
+        metrics: Dictionary of evaluation metrics
+    """
+    # Create models directory if it doesn't exist
+    models_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+                              "models", "latest")
+    os.makedirs(models_path, exist_ok=True)
+    
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 1. Save native LightGBM model
+    lgb_path = os.path.join(models_path, f"model_{timestamp}.txt")
+    model.save_model(lgb_path)
+    logger.info(f"Saved LightGBM model to {lgb_path}")
+    
+    # 2. Save as Treelite model for faster inference
+    try:
+        tl_model = treelite.Model.from_lightgbm(model)
+        tl_path = os.path.join(models_path, f"model_{timestamp}.so")
+        tl_model.export_lib(toolchain="gcc", libpath=tl_path, verbose=True, params={})
+        logger.info(f"Exported Treelite optimized model to {tl_path}")
     except Exception as e:
-        logger.error(f"Error saving model: {e}")
-        traceback.print_exc()
-        return None
+        logger.error(f"Failed to export Treelite model: {e}")
+    
+    # Also create symlinks to the latest models
+    latest_lgb = os.path.join(models_path, "model.txt")
+    latest_tl = os.path.join(models_path, "model.so")
+    
+    try:
+        if os.path.exists(latest_lgb):
+            os.remove(latest_lgb)
+        if os.path.exists(latest_tl):
+            os.remove(latest_tl)
+            
+        os.symlink(os.path.basename(lgb_path), latest_lgb)
+        os.symlink(os.path.basename(tl_path), latest_tl)
         
+        logger.info("Created symlinks to latest models")
+    except Exception as e:
+        logger.error(f"Failed to create symlinks: {e}")
+    
+    # Save model metadata and evaluation metrics
+    if metrics:
+        metadata = {
+            "timestamp": timestamp,
+            "model_path": lgb_path,
+            "treelite_path": tl_path,
+            "num_features": len(FEATURE_COLS),
+            "feature_names": FEATURE_COLS,
+            **metrics
+        }
+        
+        metadata_path = os.path.join(models_path, f"model_metadata_{timestamp}.json")
+        import json
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Symlink to latest metadata
+        latest_metadata = os.path.join(models_path, "model_metadata.json")
+        if os.path.exists(latest_metadata):
+            os.remove(latest_metadata)
+        os.symlink(os.path.basename(metadata_path), latest_metadata)
+        
+        logger.info(f"Saved model metadata to {metadata_path}")
+
 def register_model_in_db(model_path, version_tag, metrics, promote_to_prod=False):
     """
     Register the model in the database
@@ -566,69 +559,35 @@ def should_promote_model(new_metrics, current_model_info):
         return False
 
 def main():
-    """Main entry point for the trainer"""
-    logger.info("BlinkScoring ML Trainer starting")
+    """Main training pipeline"""
+    logger.info("Starting model training pipeline")
     
     try:
-        # Create models directory if it doesn't exist
-        os.makedirs(MODEL_DIR, exist_ok=True)
+        # Load data
+        df = load_data()
         
-        # Get repayment data
-        logger.info(f"Loading repayment data for the past {SNAPSHOT_DAYS} days")
-        data = get_repayment_data(SNAPSHOT_DAYS)
-        
-        if data is None or len(data) < REQUIRED_TRAINING_SAMPLES:
-            logger.error(f"Not enough training data. Required: {REQUIRED_TRAINING_SAMPLES}, Found: {0 if data is None else len(data)}")
-            return
-            
-        logger.info(f"Loaded {len(data)} training samples")
-        
-        # Prepare data
-        X, y, feature_names = prepare_training_data(data)
-        
-        if X is None:
-            logger.error("Failed to prepare training data")
-            return
-            
-        logger.info(f"Prepared training data with {X.shape[1]} features and {X.shape[0]} samples")
+        # Feature engineering
+        df = feature_engineering(df)
         
         # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
+        train_df, valid_df = temporal_split(df)
         
         # Train model
-        model = train_model(X_train, y_train, feature_names)
+        model, roc_auc, pr_auc, feature_importance = train_model(train_df, valid_df)
         
-        if model is None:
-            logger.error("Failed to train model")
-            return
-            
-        logger.info("Model training completed")
+        # Export model
+        metrics = {
+            "validation_roc_auc": float(roc_auc),
+            "validation_pr_auc": float(pr_auc),
+            "train_samples": len(train_df),
+            "validation_samples": len(valid_df),
+            "positive_rate_train": float(train_df[TARGET].mean()),
+            "positive_rate_validation": float(valid_df[TARGET].mean()),
+            "top_features": feature_importance.head(10).to_dict(orient='records')
+        }
         
-        # Evaluate model
-        metrics = evaluate_model(model, X_test, y_test, feature_names)
+        export_model(model, metrics)
         
-        if metrics is None:
-            logger.error("Failed to evaluate model")
-            return
-            
-        logger.info(f"Model evaluation: AUC = {metrics['auc']:.4f}, Accuracy = {metrics['accuracy']:.4f}")
-        
-        # Create SHAP explainer
-        explainer = create_shap_explainer(model, X_train, feature_names)
-        
-        # Generate version tag
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        version_tag = f"v{metrics['auc']:.3f}-{date_str}"
-        
-        # Save model
-        model_path = save_model(model, explainer, feature_names, metrics, version_tag)
-        
-        if model_path is None:
-            logger.error("Failed to save model")
-            return
-            
         # Get current production model
         current_model = get_active_model_info()
         
@@ -647,11 +606,11 @@ def main():
         else:
             logger.error("Failed to register model in database")
             
+        logger.info("Model training pipeline completed successfully")
+        
     except Exception as e:
-        logger.error(f"Error in main process: {e}")
-        traceback.print_exc()
-    
-    logger.info("BlinkScoring ML Trainer completed")
+        logger.error(f"Model training failed: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main() 
