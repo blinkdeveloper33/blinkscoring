@@ -21,7 +21,7 @@
           scikit-learn
           shap
           treelite
-          treelite-runtime
+          treelite_runtime
           
           # Web & API
           fastapi
@@ -59,21 +59,21 @@
             #!${pkgs.bash}/bin/bash
             export PYTHONPATH=$out/lib:$PYTHONPATH
             cd $out/lib/blinkscoring-ml
-            exec ${pythonEnv}/bin/python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port \''${PORT:-8000}
+            exec ${pythonEnv}/bin/python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port \''${PORT:-8000}
             EOF
             
             cat > $out/bin/blink-scoring-cron <<EOF
             #!${pkgs.bash}/bin/bash
             export PYTHONPATH=$out/lib:$PYTHONPATH
             cd $out/lib/blinkscoring-ml
-            exec ${pythonEnv}/bin/python -m service-cron.worker
+            exec ${pythonEnv}/bin/python -m service_cron.worker
             EOF
             
             cat > $out/bin/blink-scoring-trainer <<EOF
             #!${pkgs.bash}/bin/bash
             export PYTHONPATH=$out/lib:$PYTHONPATH
             cd $out/lib/blinkscoring-ml
-            exec ${pythonEnv}/bin/python -m service-trainer.train
+            exec ${pythonEnv}/bin/python -m service_trainer.train
             EOF
             
             chmod +x $out/bin/blink-scoring-api
