@@ -1,3 +1,6 @@
+[variables]
+NIXPACKS_NO_AUTO_INSTALL = "true"
+
 [phases.setup]
 nixPkgs = [
   "python312", 
@@ -15,26 +18,28 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  "pip install -r requirements.txt"
+  "python -m venv /opt/venv",
+  "source /opt/venv/bin/activate",
+  "pip install --no-cache-dir -r requirements.txt"
 ]
 
 # Define the different processes
 [processes.scoring]
-cmd = "cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
+cmd = "source /opt/venv/bin/activate && cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
 stopTimeout = 5
 restartPolicy = "ON_FAILURE"
 
 [processes.cron]
-cmd = "cd $NIXPACKS_APP_DIR && python -m service-cron.worker"
+cmd = "source /opt/venv/bin/activate && cd $NIXPACKS_APP_DIR && python -m service-cron.worker"
 stopTimeout = 5
 restartPolicy = "ON_FAILURE"
 
 [processes.trainer]
-cmd = "cd $NIXPACKS_APP_DIR && python -m service-trainer.train"
+cmd = "source /opt/venv/bin/activate && cd $NIXPACKS_APP_DIR && python -m service-trainer.train"
 stopTimeout = 5
 restartPolicy = "ON_FAILURE"
 
 # Default process to run
 [start]
-cmd = "cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
-stopTimeout = 5 
+cmd = "source /opt/venv/bin/activate && cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
+stopTimeout = 5
