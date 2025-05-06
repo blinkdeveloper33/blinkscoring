@@ -24,6 +24,11 @@ cmds = [
 ]
 
 # Default process to run
-[start]
-cmd = "./start-railway.sh"
-stopTimeout = 5
+[processes.web]
+cmd = "python -m uvicorn service_scoring.main:app --host 0.0.0.0 --port $PORT"
+
+[processes.cron]
+cmd = "python -m service_cron.worker"
+
+[processes.trainer]
+cmd = "python -m service_trainer.train"

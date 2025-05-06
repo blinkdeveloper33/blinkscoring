@@ -33,7 +33,7 @@ def run_scoring_service():
     
     # Start uvicorn server
     uvicorn.run(
-        "service-scoring.main:app",
+        "service_scoring.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True
