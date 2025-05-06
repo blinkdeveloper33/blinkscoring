@@ -1,0 +1,41 @@
+[phases.setup]
+nixPkgs = [
+  "python312", 
+  "python312Packages.pip", 
+  "python312Packages.lightgbm", 
+  "python312Packages.shap", 
+  "python312Packages.fastapi", 
+  "python312Packages.uvicorn", 
+  "python312Packages.sqlalchemy", 
+  "python312Packages.psycopg2", 
+  "python312Packages.pandas", 
+  "python312Packages.numpy", 
+  "python312Packages.requests", 
+  "python312Packages.treelite-runtime"
+]
+
+[phases.install]
+cmds = [
+  "pip install -r requirements.txt"
+]
+
+# Define the different processes
+[processes.scoring]
+cmd = "cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
+stopTimeout = 5
+restartPolicy = "ON_FAILURE"
+
+[processes.cron]
+cmd = "cd $NIXPACKS_APP_DIR && python -m service-cron.worker"
+stopTimeout = 5
+restartPolicy = "ON_FAILURE"
+
+[processes.trainer]
+cmd = "cd $NIXPACKS_APP_DIR && python -m service-trainer.train"
+stopTimeout = 5
+restartPolicy = "ON_FAILURE"
+
+# Default process to run
+[start]
+cmd = "cd $NIXPACKS_APP_DIR && python -m uvicorn service-scoring.main:app --host 0.0.0.0 --port $PORT"
+stopTimeout = 5 
