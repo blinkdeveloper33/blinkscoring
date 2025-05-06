@@ -1,0 +1,90 @@
+{
+  "items": [
+    {
+      "user_id": "0004e939-3dd6-485f-8f9a-2e14ce8dc62a",
+      "features": {
+        "metric_observed_history_days": 231,
+        "metric_median_paycheck": 0,
+        "metric_paycheck_regularity": 0,
+        "metric_days_since_last_paycheck": 30,
+        "metric_overdraft_count90": 0,
+        "metric_net_cash30": 0,
+        "metric_debt_load30": 0,
+        "metric_volatility90": 3.7509,
+        "metric_clean_buffer7": 0,
+        "metric_buffer_volatility": 0,
+        "metric_deposit_multiplicity30": 1
+      },
+      "persist_score": false
+    },
+    {
+      "user_id": "00327fb9-e55e-4482-a572-650c0ac70a7e",
+      "features": {
+        "metric_observed_history_days": 548,
+        "metric_median_paycheck": 1063,
+        "metric_paycheck_regularity": 5.5237,
+        "metric_days_since_last_paycheck": 11,
+        "metric_overdraft_count90": 0,
+        "metric_net_cash30": -130.28,
+        "metric_debt_load30": 0.0034,
+        "metric_volatility90": 2.0143,
+        "metric_clean_buffer7": 0.33,
+        "metric_buffer_volatility": 54.27,
+        "metric_deposit_multiplicity30": 1.5
+      },
+      "persist_score": false
+    },
+    {
+      "user_id": "003826a8-d4a8-4296-86a4-4b82aae62bf4",
+      "features": {
+        "metric_observed_history_days": 199,
+        "metric_median_paycheck": 0,
+        "metric_paycheck_regularity": 0,
+        "metric_days_since_last_paycheck": 30,
+        "metric_overdraft_count90": 0,
+        "metric_net_cash30": -3.92,
+        "metric_debt_load30": 0.0478,
+        "metric_volatility90": 2.1917,
+        "metric_clean_buffer7": 658.94,
+        "metric_buffer_volatility": 167.65,
+        "metric_deposit_multiplicity30": 15
+      },
+      "persist_score": false
+    },
+    {
+      "user_id": "0078cc56-562a-45de-b84f-c5c47488845f",
+      "features": {
+        "metric_observed_history_days": 392,
+        "metric_median_paycheck": 64.03,
+        "metric_paycheck_regularity": 0,
+        "metric_days_since_last_paycheck": 30,
+        "metric_overdraft_count90": 0,
+        "metric_net_cash30": 3.42,
+        "metric_debt_load30": 0,
+        "metric_volatility90": 2.4076,
+        "metric_clean_buffer7": 0.83,
+        "metric_buffer_volatility": 24.85,
+        "metric_deposit_multiplicity30": 4
+      },
+      "persist_score": false
+    },
+    {
+      "user_id": "007b3552-7e1a-4752-aa91-8c586cfc5708",
+      "features": {
+        "metric_observed_history_days": 588,
+        "metric_median_paycheck": 1424.51,
+        "metric_paycheck_regularity": 3.7762,
+        "metric_days_since_last_paycheck": 3,
+        "metric_overdraft_count90": 1,
+        "metric_net_cash30": -139.19,
+        "metric_debt_load30": 0.0485,
+        "metric_volatility90": 2.0942,
+        "metric_clean_buffer7": -179.83,
+        "metric_buffer_volatility": 402.44,
+        "metric_deposit_multiplicity30": 1
+      },
+      "persist_score": false
+    }
+  ],
+  "persist_scores": false
+}
